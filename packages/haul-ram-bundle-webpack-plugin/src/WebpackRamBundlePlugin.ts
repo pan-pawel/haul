@@ -149,11 +149,6 @@ export default class WebpackRamBundlePlugin {
         // Render modules to it's 'final' form with injected webpack variables
         // and wrapped with ModuleTemplate.
 
-        const minifyWorker = new Worker(require.resolve('./worker'), {
-          numWorkers: 4,
-        });
-        const TMP_MODULES_DIR = path.join(__dirname, 'tmp');
-        mkdir.sync(TMP_MODULES_DIR);
 
         this.modules = await Promise.all(
           compilation.modules.map(async webpackModule => {
@@ -175,17 +170,15 @@ export default class WebpackRamBundlePlugin {
             let map = renderedModule.map;
 
             if (this.minify) {
-              const minifyOptionsWithMap = {
+              const minifiedSource = terser.minify(code, {
                 ...this.minifyOptions,
                 sourceMap: {
-                  content: map,
+                  content: renderedModule.map,
                 },
-              };
-              // @ts-ignore property minify does not exist on type 'JestWorker'
-              const minifiedSource = await minifyWorker.minify(code, minifyOptionsWithMap);
-              //Check if there is no error in minifed source
+              });
+              // Check if there is no error in minifed source
               assert(!minifiedSource.error, minifiedSource.error);
-
+  
               code = minifiedSource.code || '';
               if (typeof minifiedSource.map === 'string') {
                 map = JSON.parse(minifiedSource.map);
@@ -209,7 +202,6 @@ export default class WebpackRamBundlePlugin {
           })
         );
 
-        minifyWorker.end();
 
         const indent = (line: string) => `/*****/  ${line}`;
         let bootstrap = fs.readFileSync(
