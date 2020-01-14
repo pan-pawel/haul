@@ -72,6 +72,8 @@ export default class WebpackRamBundlePlugin {
   singleBundleMode: boolean = true;
   minify: boolean = false;
   minifyOptions: WebpackRamBundlePluginOptions['minifyOptions'] = undefined;
+  worker: Worker
+  modulesPromise: Promise<string | void>
 
   constructor({
     sourceMap,
@@ -89,6 +91,11 @@ export default class WebpackRamBundlePlugin {
       : this.singleBundleMode;
     this.minify = hasValue(minify) ? Boolean(minify) : this.minify;
     this.minifyOptions = minifyOptions;
+
+    this.worker = new Worker(require.resolve('./worker'), {
+      numWorkers: 4,
+    });
+    this.modulesPromise = Promise.reject('This should have never happened')
   }
 
   apply(compiler: webpack.Compiler) {
@@ -99,13 +106,79 @@ export default class WebpackRamBundlePlugin {
       }
     );
 
+    compiler.hooks.make.tapPromise(
+      'WebpackRamBundlePlugin',
+      async _compilation => {
+        this.modulesPromise = new Promise(async (resolve) => {
+          const compilation: Compilation = _compilation as any;
+          const moduleMappings: { [key: string]: number } = {}
+  
+          this.modules = await Promise.all(
+            compilation.modules.map(async webpackModule => {
+              
+          // console.log('fired')
+              const renderedModule = compilation.moduleTemplates.javascript
+                .render(
+                  webpackModule,
+                  compilation.dependencyTemplates,
+                  compilation.options
+                )
+                .sourceAndMap();
+  
+              if (typeof webpackModule.id === 'string') {
+                moduleMappings[webpackModule.id] = webpackModule.index;
+              }
+  
+              let code = `__haul_${this.bundleName}.l(${variableToString(
+                webpackModule.id
+              )}, ${renderedModule.source});`;
+              let map = renderedModule.map;
+  
+              if (this.minify) {
+                const minifyOptionsWithMap = {
+                  ...this.minifyOptions,
+                  sourceMap: {
+                    content: map,
+                  },
+                };
+                // @ts-ignore property minify does not exist on type 'JestWorker'
+                const minifiedSource = await this.minifyWorker.minify(code, minifyOptionsWithMap);
+                //Check if there is no error in minifed source
+                assert(!minifiedSource.error, minifiedSource.error);
+  
+                code = minifiedSource.code || '';
+                if (typeof minifiedSource.map === 'string') {
+                  map = JSON.parse(minifiedSource.map);
+                }
+              }
+  
+              return {
+                id: webpackModule.id,
+                idx: webpackModule.index,
+                filename: webpackModule.resource,
+                source: code,
+                map: {
+                  ...map,
+                  file: `${
+                    typeof webpackModule.id === 'string'
+                      ? webpackModule.index
+                      : webpackModule.id
+                  }.js`,
+                },
+              };
+            })
+          )
+          resolve()
+        })    
+      }
+    )
+
     compiler.hooks.emit.tapPromise(
       'WebpackRamBundlePlugin',
       async _compilation => {
         // Cast compilation from @types/webpack to custom Compilation type
         // which contains additional properties.
         const compilation: Compilation = _compilation as any;
-
         const moduleMappings: ModuleMappings = {
           modules: {},
           chunks: {},
@@ -129,183 +202,133 @@ export default class WebpackRamBundlePlugin {
             });
         });
 
-        // Omit chunks mapping if there's only a single main chunk
-        if (compilation.chunks.length === 1) {
-          moduleMappings.chunks = {};
-        }
+        /////////    WAIT FOR MODULES HERE
+        this.modulesPromise.then(() => {
+          // Omit chunks mapping if there's only a single main chunk
+        // if (compilation.chunks.length === 1) {
+        //   moduleMappings.chunks = {};
+        // }
 
-        if (mainId === undefined) {
-          throw new Error(
-            "WebpackRamBundlePlugin: couldn't find main chunk's entry module id"
-          );
-        }
-        if (!mainChunk) {
-          throw new Error("WebpackRamBundlePlugin: couldn't find main chunk");
-        }
+        // if (mainId === undefined) {
+        //   throw new Error(
+        //     "WebpackRamBundlePlugin: couldn't find main chunk's entry module id"
+        //   );
+        // }
+        // if (!mainChunk || mainChunk === undefined) {
+        //   throw new Error("WebpackRamBundlePlugin: couldn't find main chunk");
+        // }
 
-        // Render modules to it's 'final' form with injected webpack variables
-        // and wrapped with ModuleTemplate.
+        // // Render modules to it's 'final' form with injected webpack variables
+        // // and wrapped with ModuleTemplate.
 
-        const minifyWorker = new Worker(require.resolve('./worker'), {
-          numWorkers: 4,
-        });
-        const TMP_MODULES_DIR = path.join(__dirname, 'tmp');
-        mkdir.sync(TMP_MODULES_DIR);
+        // const TMP_MODULES_DIR = path.join(__dirname, 'tmp');
+        // mkdir.sync(TMP_MODULES_DIR);
 
-        this.modules = await Promise.all(
-          compilation.modules.map(async webpackModule => {
-            const renderedModule = compilation.moduleTemplates.javascript
-              .render(
-                webpackModule,
-                compilation.dependencyTemplates,
-                compilation.options
-              )
-              .sourceAndMap();
+        //   const indent = (line: string) => `/*****/  ${line}`;
+        //   let bootstrap = fs.readFileSync(
+        //     path.join(__dirname, '../runtime/bootstrap.js'),
+        //     'utf8'
+        //   );
+        //   if (typeof this.bundleName !== 'string' || !this.bundleName.length) {
+        //     throw new Error(
+        //       'WebpackRamBundlePlugin: bundle name cannot be empty string'
+        //     );
+        //   }
+  
+        //   bootstrap =
+        //     `(${bootstrap.trim()})(this, ${inspect(
+        //       {
+        //         bundleName: this.bundleName,
+        //         mainModuleId: mainId,
+        //         preloadBundleNames: this.preloadBundles,
+        //         singleBundleMode: this.singleBundleMode,
+        //         moduleMappings,
+        //       },
+        //       {
+        //         depth: null,
+        //         maxArrayLength: null,
+        //         breakLength: Infinity,
+        //       }
+        //     )});`
+        //       .split('\n')
+        //       .map(indent)
+        //       .join('\n') + '\n';
+  
+        //   // Enhance bootstrapCode with additional JS from plugins that hook
+        //   // into `renderWithEntry` for example: webpack's `library` is used here to expose
+        //   // bundle as a library.
+        //   const renderWithEntryResults = compilation.mainTemplate.hooks.renderWithEntry.call(
+        //     bootstrap,
+        //     mainChunk,
+        //     mainChunk.hash
+        //   );
+        //   if (typeof renderWithEntryResults === 'string') {
+        //     bootstrap = renderWithEntryResults;
+        //   } else if ('source' in renderWithEntryResults) {
+        //     bootstrap = renderWithEntryResults.source();
+        //   }
+  
+        //   if (this.minify) {
+        //     const { error, code } = terser.minify(bootstrap);
+        //     if (error) {
+        //       throw error;
+        //     }
+        //     bootstrap = code || '';
+        //   }
+  
+        //   const outputFilename = compilation.outputOptions.filename!;
+        //   const outputDest = path.isAbsolute(outputFilename)
+        //     ? outputFilename
+        //     : path.join(compilation.outputOptions.path, outputFilename);
+  
+        //   const sourceMapFilename = compilation.getPath(
+        //     compilation.outputOptions.sourceMapFilename,
+        //     {
+        //       filename: path.isAbsolute(outputFilename)
+        //         ? path.relative(compilation.context, outputFilename)
+        //         : outputFilename,
+        //     }
+        //   );
+  
+        //   const bundle = this.indexRamBundle
+        //     ? new IndexRamBundle(bootstrap, this.modules, this.sourceMap)
+        //     : new FileRamBundle(
+        //         bootstrap,
+        //         this.modules,
+        //         this.sourceMap,
+        //         this.bundleName,
+        //         this.singleBundleMode
+        //       );
+  
+        //   const filesToRemove: string[] = compilation.chunks.reduce(
+        //     (acc, chunk) => {
+        //       if (chunk.name !== 'main') {
+        //         return [...acc, ...chunk.files];
+        //       }
+        //       return acc;
+        //     },
+        //     []
+        //   );
+        //   console.log(filesToRemove.length, '@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@')
+        //   debugger
+        //   Object.keys(compilation.assets).forEach(assetName => {
+        //     const remove = filesToRemove.some(file => assetName.endsWith(file));
+        //     if (remove) {
+        //       console.log(compilation.assets[assetName])
+        //       delete compilation.assets[assetName];
+        //     }
+        //   });
+  
+        //   bundle.build({
+        //     outputDest,
+        //     outputFilename,
+        //     sourceMapFilename,
+        //     compilation,
+        //   });
+        }).catch(reason => console.log(reason))
 
-            if (typeof webpackModule.id === 'string') {
-              moduleMappings.modules[webpackModule.id] = webpackModule.index;
-            }
 
-            let code = `__haul_${this.bundleName}.l(${variableToString(
-              webpackModule.id
-            )}, ${renderedModule.source});`;
-            let map = renderedModule.map;
-
-            if (this.minify) {
-              const minifyOptionsWithMap = {
-                ...this.minifyOptions,
-                sourceMap: {
-                  content: map,
-                },
-              };
-              // @ts-ignore property minify does not exist on type 'JestWorker'
-              const minifiedSource = await minifyWorker.minify(code, minifyOptionsWithMap);
-              //Check if there is no error in minifed source
-              assert(!minifiedSource.error, minifiedSource.error);
-
-              code = minifiedSource.code || '';
-              if (typeof minifiedSource.map === 'string') {
-                map = JSON.parse(minifiedSource.map);
-              }
-            }
-
-            return {
-              id: webpackModule.id,
-              idx: webpackModule.index,
-              filename: webpackModule.resource,
-              source: code,
-              map: {
-                ...map,
-                file: `${
-                  typeof webpackModule.id === 'string'
-                    ? webpackModule.index
-                    : webpackModule.id
-                }.js`,
-              },
-            };
-          })
-        );
-
-        minifyWorker.end();
-
-        const indent = (line: string) => `/*****/  ${line}`;
-        let bootstrap = fs.readFileSync(
-          path.join(__dirname, '../runtime/bootstrap.js'),
-          'utf8'
-        );
-        if (typeof this.bundleName !== 'string' || !this.bundleName.length) {
-          throw new Error(
-            'WebpackRamBundlePlugin: bundle name cannot be empty string'
-          );
-        }
-
-        bootstrap =
-          `(${bootstrap.trim()})(this, ${inspect(
-            {
-              bundleName: this.bundleName,
-              mainModuleId: mainId,
-              preloadBundleNames: this.preloadBundles,
-              singleBundleMode: this.singleBundleMode,
-              moduleMappings,
-            },
-            {
-              depth: null,
-              maxArrayLength: null,
-              breakLength: Infinity,
-            }
-          )});`
-            .split('\n')
-            .map(indent)
-            .join('\n') + '\n';
-
-        // Enhance bootstrapCode with additional JS from plugins that hook
-        // into `renderWithEntry` for example: webpack's `library` is used here to expose
-        // bundle as a library.
-        const renderWithEntryResults = compilation.mainTemplate.hooks.renderWithEntry.call(
-          bootstrap,
-          mainChunk,
-          mainChunk.hash
-        );
-        if (typeof renderWithEntryResults === 'string') {
-          bootstrap = renderWithEntryResults;
-        } else if ('source' in renderWithEntryResults) {
-          bootstrap = renderWithEntryResults.source();
-        }
-
-        if (this.minify) {
-          const { error, code } = terser.minify(bootstrap);
-          if (error) {
-            throw error;
-          }
-          bootstrap = code || '';
-        }
-
-        const outputFilename = compilation.outputOptions.filename!;
-        const outputDest = path.isAbsolute(outputFilename)
-          ? outputFilename
-          : path.join(compilation.outputOptions.path, outputFilename);
-
-        const sourceMapFilename = compilation.getPath(
-          compilation.outputOptions.sourceMapFilename,
-          {
-            filename: path.isAbsolute(outputFilename)
-              ? path.relative(compilation.context, outputFilename)
-              : outputFilename,
-          }
-        );
-
-        const bundle = this.indexRamBundle
-          ? new IndexRamBundle(bootstrap, this.modules, this.sourceMap)
-          : new FileRamBundle(
-              bootstrap,
-              this.modules,
-              this.sourceMap,
-              this.bundleName,
-              this.singleBundleMode
-            );
-
-        const filesToRemove: string[] = compilation.chunks.reduce(
-          (acc, chunk) => {
-            if (chunk.name !== 'main') {
-              return [...acc, ...chunk.files];
-            }
-            return acc;
-          },
-          []
-        );
-        Object.keys(compilation.assets).forEach(assetName => {
-          const remove = filesToRemove.some(file => assetName.endsWith(file));
-          if (remove) {
-            delete compilation.assets[assetName];
-          }
-        });
-
-        bundle.build({
-          outputDest,
-          outputFilename,
-          sourceMapFilename,
-          compilation,
-        });
+        // return false
       }
     );
   }
